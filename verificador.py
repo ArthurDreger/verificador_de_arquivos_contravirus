@@ -7,19 +7,15 @@ from tkinter import filedialog, messagebox
 
 # --- CONFIGURAÇÃO ---
 API_KEY = "COLE_SUA_API_KEY_AQUI"
-ARQUIVO_LOG = "vt_history.txt"  # Arquivo onde guardaremos os horários
+ARQUIVO_LOG = "vt_history.txt"
 LIMITE_REQUISICOES = 4
 INTERVALO_SEGUNDOS = 60
 
 def gerenciar_limite_api():
-    """
-    Lê o arquivo de log e garante que não excedemos 4 requests/minuto.
-    Se necessário, pausa a execução pelo tempo exato.
-    """
+    """Gerencia o limite de 4 requisições por minuto"""
     agora = time.time()
     timestamps = []
 
-    # 1. Lê o histórico existente
     if os.path.exists(ARQUIVO_LOG):
         try:
             with open(ARQUIVO_LOG, "r") as f:
@@ -31,25 +27,18 @@ def gerenciar_limite_api():
         except Exception:
             pass
 
-    # 2. Filtra: Mantém apenas os registros dos últimos 60 segundos
     timestamps_recentes = [t for t in timestamps if (agora - t) < INTERVALO_SEGUNDOS]
 
-    # 3. Verifica se atingimos o limite
     if len(timestamps_recentes) >= LIMITE_REQUISICOES:
-        # Pega o horário da requisição mais antiga desse grupo recente
         mais_antigo = min(timestamps_recentes)
-        
-        tempo_para_liberar = INTERVALO_SEGUNDOS - (agora - mais_antigo) + 1 # +1s de margem
+        tempo_para_liberar = INTERVALO_SEGUNDOS - (agora - mais_antigo) + 1
         
         if tempo_para_liberar > 0:
-            print(f" >> Limite atingido. Aguardando {tempo_para_liberar:.1f} segundos para evitar bloqueio...")
+            print(f" >> Limite de API próximo. Aguardando {tempo_para_liberar:.1f}s...")
             time.sleep(tempo_para_liberar)
-            # Atualiza o 'agora' pós-espera
             agora = time.time()
-            # Recalcula a lista (remove o que expirou durante a espera)
             timestamps_recentes = [t for t in timestamps_recentes if (agora - t) < INTERVALO_SEGUNDOS]
 
-    # 4. Adiciona o momento atual na lista e salva no arquivo
     timestamps_recentes.append(agora)
     
     with open(ARQUIVO_LOG, "w") as f:
@@ -67,97 +56,148 @@ def calcular_hash(caminho_arquivo):
         print(f" [X] Erro ao ler arquivo: {e}")
         return None
 
-def consultar_virustotal(hash_arquivo):
-    # CHAMA A FUNÇÃO DE DELAY INTELIGENTE ANTES DE CONSULTAR
-    gerenciar_limite_api()
-    
+def consultar_hash(hash_arquivo):
+    gerenciar_limite_api() # Conta como 1 requisição
     url = f"https://www.virustotal.com/api/v3/files/{hash_arquivo}"
     headers = {"x-apikey": API_KEY}
     
     try:
         response = requests.get(url, headers=headers)
-        
         if response.status_code == 200:
-            dados = response.json()
-            stats = dados['data']['attributes']['last_analysis_stats']
-            return stats['malicious']
+            return response.json()
         elif response.status_code == 404:
-            return "Desconhecido (Nunca escaneado)"
-        elif response.status_code == 429:
-            return "ERRO: Limite de API excedido (O delay falhou?)"
+            return None # Não encontrado
         else:
-            return f"Erro HTTP {response.status_code}"
+            return f"Erro {response.status_code}"
     except Exception as e:
         return f"Erro Conexão: {e}"
 
-def processar_alvo(caminho, eh_pasta):
-    print(f"\n--- Iniciando Varredura ---")
+def fazer_upload(caminho_arquivo):
+    """Envia o arquivo físico para o VirusTotal"""
+    print(" >> Enviando arquivo (isso pode demorar dependendo do tamanho)...")
+    gerenciar_limite_api() # Conta como 1 requisição
     
-    arquivos_para_processar = []
+    url = "https://www.virustotal.com/api/v3/files"
+    headers = {"x-apikey": API_KEY}
+    
+    try:
+        with open(caminho_arquivo, "rb") as f:
+            files = {"file": (os.path.basename(caminho_arquivo), f)}
+            response = requests.post(url, headers=headers, files=files)
+        
+        if response.status_code == 200:
+            return response.json()['data']['id'] # Retorna o ID da análise
+        else:
+            print(f"Erro no upload: {response.status_code} - {response.text}")
+            return None
+    except Exception as e:
+        print(f"Erro ao enviar: {e}")
+        return None
 
-    if eh_pasta:
-        for raiz, _, arquivos in os.walk(caminho):
-            for arq in arquivos:
-                arquivos_para_processar.append(os.path.join(raiz, arq))
+def checar_analise(analysis_id):
+    """Verifica se a análise do arquivo enviado já terminou"""
+    url = f"https://www.virustotal.com/api/v3/analyses/{analysis_id}"
+    headers = {"x-apikey": API_KEY}
+    
+    while True:
+        gerenciar_limite_api() # Conta como 1 requisição a cada tentativa
+        response = requests.get(url, headers=headers)
+        
+        if response.status_code == 200:
+            dados = response.json()
+            status = dados['data']['attributes']['status']
+            
+            if status == "completed":
+                return dados['data']['attributes']['stats']['malicious']
+            else:
+                print(" >> Ainda analisando... aguardando 20 segundos...")
+                time.sleep(20) # Espera manual para não gastar API à toa
+        else:
+            print(f"Erro ao checar status: {response.status_code}")
+            return None
+
+def exibir_resultado(malicioso):
+    if isinstance(malicioso, int):
+        if malicioso == 0:
+            print("✅ LIMPO (Após análise profunda)")
+        elif malicioso < 3:
+            print(f"⚠️ SUSPEITO ({malicioso} detecções)")
+        else:
+            print(f"🚨 PERIGO! ({malicioso} DETECÇÕES!)")
     else:
-        arquivos_para_processar.append(caminho)
+        print(f"❓ Resultado inconclusivo: {malicioso}")
 
-    total = len(arquivos_para_processar)
-    print(f"Alvo: {caminho}")
-    print(f"Total de arquivos encontrados: {total}\n")
+def processar_alvo(caminho, eh_pasta):
+    arquivos = []
+    if eh_pasta:
+        for r, _, f in os.walk(caminho):
+            for file in f: arquivos.append(os.path.join(r, file))
+    else:
+        arquivos.append(caminho)
 
-    for i, arquivo_path in enumerate(arquivos_para_processar):
-        nome_arquivo = os.path.basename(arquivo_path)
-        print(f"[{i+1}/{total}] Analisando: {nome_arquivo}...", end=" ", flush=True)
+    print(f"--- Iniciando --- Total: {len(arquivos)}")
+
+    for i, arquivo_path in enumerate(arquivos):
+        nome = os.path.basename(arquivo_path)
+        print(f"[{i+1}/{len(arquivos)}] {nome}...", end=" ", flush=True)
 
         file_hash = calcular_hash(arquivo_path)
+        if not file_hash: continue
+
+        # 1. Tenta consultar pelo Hash
+        resposta = consultar_hash(file_hash)
+
+        if isinstance(resposta, dict):
+            # Já existe no banco
+            malicioso = resposta['data']['attributes']['last_analysis_stats']['malicious']
+            if malicioso == 0: print("✅ LIMPO")
+            elif malicioso < 3: print(f"⚠️ SUSPEITO ({malicioso})")
+            else: print(f"🚨 PERIGO ({malicioso})")
         
-        if file_hash:
-            resultado = consultar_virustotal(file_hash)
+        elif resposta is None:
+            # Não existe
+            print("❓ DESCONHECIDO.")
+            escolha = input("    >> Arquivo nunca visto. Deseja fazer UPLOAD para verificar? (s/n): ").lower()
             
-            if isinstance(resultado, int):
-                if resultado == 0:
-                    print("✅ LIMPO")
-                elif resultado < 3:
-                    print(f"⚠️ SUSPEITO ({resultado} detecções)")
-                else:
-                    print(f"🚨 PERIGO! ({resultado} DETECÇÕES!)")
+            if escolha == 's':
+                analise_id = fazer_upload(arquivo_path)
+                if analise_id:
+                    print("    >> Aguardando resultado da análise na nuvem...")
+                    resultado_upload = checar_analise(analise_id)
+                    print(f"    >> Resultado final para {nome}: ", end="")
+                    exibir_resultado(resultado_upload)
             else:
-                print(f"❓ {resultado}")
+                print("    >> Pulado.")
         else:
-            print("Pular (Erro leitura)")
+            print(f"Erro: {resposta}")
 
-    print("\n--- Processo Finalizado ---")
-    input("Pressione ENTER para sair...")
+    print("\n--- Fim ---")
+    input("Enter para sair...")
 
-# --- INTERFACE GRÁFICA (GUI) ---
+# --- GUI ---
 def iniciar_gui():
     root = tk.Tk()
-    root.title("Scanner VirusTotal")
+    root.title("Scanner VirusTotal PRO")
     root.geometry("300x150")
 
-    def selecionar_arquivo():
-        path = filedialog.askopenfilename(title="Selecione um Arquivo")
-        if path:
+    def sel_arq():
+        p = filedialog.askopenfilename()
+        if p: 
             root.destroy()
-            processar_alvo(path, eh_pasta=False)
+            processar_alvo(p, False)
 
-    def selecionar_pasta():
-        path = filedialog.askdirectory(title="Selecione uma Pasta")
-        if path:
+    def sel_pasta():
+        p = filedialog.askdirectory()
+        if p: 
             root.destroy()
-            processar_alvo(path, eh_pasta=True)
+            processar_alvo(p, True)
 
-    tk.Label(root, text="O que deseja verificar?", font=("Arial", 12)).pack(pady=10)
+    tk.Label(root, text="Scanner VirusTotal v2", font=("Arial", 12)).pack(pady=10)
+    tk.Button(root, text="Arquivo", command=sel_arq).pack(side=tk.LEFT, padx=20)
+    tk.Button(root, text="Pasta", command=sel_pasta).pack(side=tk.RIGHT, padx=20)
     
-    btn_frame = tk.Frame(root)
-    btn_frame.pack(pady=10)
-
-    tk.Button(btn_frame, text="Arquivo Único", command=selecionar_arquivo, width=15).pack(side=tk.LEFT, padx=5)
-    tk.Button(btn_frame, text="Pasta Inteira", command=selecionar_pasta, width=15).pack(side=tk.LEFT, padx=5)
-
     if API_KEY == "COLE_SUA_API_KEY_AQUI":
-        messagebox.showerror("Erro", "Configure sua API KEY no código antes de usar!")
+        messagebox.showerror("Erro", "Configure a API KEY!")
     else:
         root.mainloop()
 
