@@ -13,7 +13,7 @@ from datetime import datetime
 # --- CONFIGURAÇÃO GLOBAL ---
 ARQUIVO_HISTORICO = "vt_history_control.txt"
 ARQUIVO_RELATORIO = "relatorio_scan.csv"
-ARQUIVO_CONFIG = "config.json"
+ARQUIVO_CONFIG = "config.txt"
 
 class VirusTotalApp:
     def __init__(self, root):
@@ -203,4 +203,5 @@ class VirusTotalApp:
 if __name__ == "__main__":
     root = tk.Tk()
     app = VirusTotalApp(root)
+
     root.mainloop()
