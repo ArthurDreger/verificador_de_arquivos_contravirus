@@ -1,0 +1,5 @@
+{
+    "api_key": "COLE_SUA_API_KEY_AQUI_DENTRO",
+    "limite_requisicoes": 4,
+    "intervalo_segundos": 60
+}
